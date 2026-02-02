@@ -1,0 +1,24 @@
+{
+  "name": "organize-media",
+  "version": "0.1.0",
+  "description": "Node.js utility for organizing photo and video files based on metadata, handling duplicates, and preserving progress state.",
+  "main": "dist/index.js",
+  "bin": {
+    "organize-media": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && node ./dist/index.js",
+    "dev": "ts-node ./src/index.ts"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "kleur": "^4.1.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^25.1.0",
+    "ts-node": "^10.9.1"
+  }
+}
