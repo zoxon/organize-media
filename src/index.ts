@@ -8,12 +8,13 @@ import { ProgressBar } from './helpers'
 /* ---------- CONFIG ---------- */
 
 const EXIFTOOL = process.platform === 'win32' ? 'exiftool.exe' : 'exiftool'
+const RECOVER_DATE = process.argv.includes('--recover-date')
 
 const SOURCE_DIR = process.argv[2]
 const TARGET_DIR = process.argv[3]
 
 if (!SOURCE_DIR || !TARGET_DIR) {
-  console.error('Usage: npm start -- <sourceDir> <targetDir>')
+  console.error('Usage: npm start -- <sourceDir> <targetDir> [--recover-date]')
   process.exit(1)
 }
 
@@ -21,9 +22,21 @@ if (!SOURCE_DIR || !TARGET_DIR) {
 
 type ExifRow = {
   SourceFile: string
+
+  // High confidence (real capture time)
   DateTimeOriginal?: string
   CreateDate?: string
   MediaCreateDate?: string
+
+  // Medium confidence (messengers / containers)
+  MetadataDate?: string
+  TrackCreateDate?: string
+  CreationDate?: string
+
+  // Low confidence (filesystem)
+  FileCreateDate?: string
+  FileModifyDate?: string
+
   ContentIdentifier?: string
 }
 
@@ -50,10 +63,57 @@ const log: LogEntry[] = []
 const MEDIA_EXT = new Set([
   '.jpg', '.jpeg', '.png', '.heic',
   '.mov', '.mp4', '.avi', '.mkv',
-  '.webp'
+  '.webp', '.dng'
 ])
 
 /* ---------- HELPERS ---------- */
+
+function parseExifDate(raw?: string): Date | null {
+  if (!raw) return null
+  const fixed = raw.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3')
+  const d = new Date(fixed)
+  return isNaN(d.getTime()) ? null : d
+}
+
+/**
+ * Returns date and whether it is approximate
+ */
+function resolveDate(row: ExifRow): { date: Date | null; approx: boolean } {
+  // High confidence (photos)
+  const exact =
+    parseExifDate(row.DateTimeOriginal) ||
+    parseExifDate(row.CreateDate) ||
+    parseExifDate(row.MediaCreateDate)
+
+  if (exact) {
+    return { date: exact, approx: false }
+  }
+
+  if (!RECOVER_DATE) {
+    return { date: null, approx: false }
+  }
+
+  // Medium confidence (messenger / container)
+  const medium =
+    parseExifDate(row.MetadataDate) ||
+    parseExifDate(row.TrackCreateDate) ||
+    parseExifDate(row.CreationDate)
+
+  if (medium) {
+    return { date: medium, approx: true }
+  }
+
+  // Low confidence (filesystem)
+  const low =
+    parseExifDate(row.FileCreateDate) ||
+    parseExifDate(row.FileModifyDate)
+
+  if (low) {
+    return { date: low, approx: true }
+  }
+
+  return { date: null, approx: false }
+}
 
 
 function isMediaFile(file: string): boolean {
@@ -69,6 +129,7 @@ async function walk(dir: string): Promise<string[]> {
     if (e.isDirectory()) result.push(...(await walk(full)))
     else if (e.isFile()) result.push(full)
   }
+
   return result
 }
 
@@ -76,11 +137,24 @@ function runExifTool(files: string[]): Promise<ExifRow[]> {
   return new Promise((resolve, reject) => {
     const args = [
       '-json',
+
+      // High confidence
       '-DateTimeOriginal',
       '-CreateDate',
       '-MediaCreateDate',
+
+      // Medium
+      '-MetadataDate',
+      '-TrackCreateDate',
+      '-CreationDate',
+
+      // Low
+      '-FileCreateDate',
+      '-FileModifyDate',
+
       '-ContentIdentifier',
-      '-@', '-',
+      '-@',
+      '-',
     ]
 
     const p = spawn(EXIFTOOL, args, {
@@ -114,10 +188,7 @@ async function runExifToolBatch(files: string[]): Promise<ExifRow[]> {
   const bar = new ProgressBar(files.length, `📸 Reading metadata `)
 
   for (let i = 0; i < files.length; i += BATCH_SIZE) {
-    const batch = files.slice(i, i + BATCH_SIZE)
-
-    const rows = await runExifTool(batch)
-
+    const rows = await runExifTool(files.slice(i, i + BATCH_SIZE))
     for (const r of rows) {
       bar.tick(path.basename(r.SourceFile))
       results.push(r)
@@ -126,14 +197,6 @@ async function runExifToolBatch(files: string[]): Promise<ExifRow[]> {
 
   bar.finish()
   return results
-}
-
-function parseDate(row: ExifRow): Date | null {
-  const raw = row.DateTimeOriginal || row.CreateDate || row.MediaCreateDate
-  if (!raw) return null
-  const fixed = raw.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3')
-  const d = new Date(fixed)
-  return isNaN(d.getTime()) ? null : d
 }
 
 async function md5(file: string): Promise<string> {
@@ -154,58 +217,6 @@ async function ensureDir(p: string) {
   await fs.mkdir(p, { recursive: true })
 }
 
-async function loadState(): Promise<State> {
-  try {
-    const raw = await fs.readFile(STATE_PATH, 'utf8')
-    return JSON.parse(raw)
-  } catch {
-    return { version: 1, processedFiles: {}, knownHashes: {} }
-  }
-}
-
-async function saveState(state: State) {
-  await fs.writeFile(STATE_PATH, JSON.stringify(state, null, 2), 'utf8')
-}
-
-
-// Для переименования / копирования
-async function copyFilesWithProgress(items: ExifRow[], state: State, bar: ProgressBar) {
-  for (const item of items) {
-    try {
-      const master = item
-      const hash = state.processedFiles[master.SourceFile]
-
-      const date = parseDate(master)
-      let baseDir: string
-      let baseName: string
-
-      if (!date) {
-        baseDir = path.join(TARGET_DIR, 'no-photo-taken-date')
-        baseName = hash
-      } else {
-        const y = date.getFullYear().toString()
-        const m = String(date.getMonth() + 1).padStart(2, '0')
-        const d = String(date.getDate()).padStart(2, '0')
-        const hh = String(date.getHours()).padStart(2, '0')
-        const mm = String(date.getMinutes()).padStart(2, '0')
-        const ss = String(date.getSeconds()).padStart(2, '0')
-        baseDir = path.join(TARGET_DIR, y, m, d)
-        baseName = `${y}.${m}.${d}_${hh}.${mm}.${ss}-${hash}`
-      }
-
-      await ensureDir(baseDir)
-      const ext = path.extname(master.SourceFile).toLowerCase()
-      const target = path.join(baseDir, `${baseName}${ext}`)
-      await fs.copyFile(master.SourceFile, target)
-
-      bar.tick(path.basename(master.SourceFile))
-    } catch (e: any) {
-      log.push({ type: 'error', file: item.SourceFile, message: e.message ?? String(e) })
-    }
-  }
-}
-
-
 /* ---------- MAIN ---------- */
 
 async function main() {
@@ -215,100 +226,43 @@ async function main() {
   const allFiles = await walk(SOURCE_DIR)
   const mediaFiles = allFiles.filter(isMediaFile)
 
-  console.log('📦 Loading state...')
-  const state = await loadState()
+  console.log(`📂 Found ${mediaFiles.length} files`)
 
-  const newFiles = mediaFiles.filter((f) => !state.processedFiles[f])
+  const meta = await runExifToolBatch(mediaFiles)
+  const bar = new ProgressBar(meta.length, `📦 Copying files     `)
 
-  console.log(`📂 Found ${mediaFiles.length} files, ${newFiles.length} new`)
-
-  if (newFiles.length === 0) {
-    console.log('✅ Nothing to do')
-    return
-  }
-
-  const meta = await runExifToolBatch(newFiles)
-
-  // Сохраняем state сразу после чтения метаданных
   for (const row of meta) {
-    if (!state.processedFiles[row.SourceFile]) state.processedFiles[row.SourceFile] = ''
-  }
-  await saveState(state)
+    const { date, approx } = resolveDate(row)
+    const hash = await md5(row.SourceFile)
 
-  // Создаём общий прогрессбар на все файлы, которые будут копироваться
-  const totalToCopy = meta.length
-  const bar = new ProgressBar(totalToCopy, `📦 Copying files     `)
+    let baseDir: string
+    let baseName: string
 
-  // Группировка Live Photos
-  const groups = new Map<string, ExifRow[]>()
-  for (const row of meta) {
-    const key = row.ContentIdentifier ?? path.basename(row.SourceFile, path.extname(row.SourceFile))
-    if (!groups.has(key)) groups.set(key, [])
-    groups.get(key)!.push(row)
-  }
+    if (!date) {
+      baseDir = path.join(TARGET_DIR, 'no-photo-taken-date')
+      baseName = hash
+    } else {
+      const y = date.getFullYear()
+      const m = String(date.getMonth() + 1).padStart(2, '0')
+      const d = String(date.getDate()).padStart(2, '0')
+      const hh = String(date.getHours()).padStart(2, '0')
+      const mm = String(date.getMinutes()).padStart(2, '0')
+      const ss = String(date.getSeconds()).padStart(2, '0')
 
-  for (const [, items] of groups) {
-    try {
-      const master =
-        items.find((i) => isPhoto(path.extname(i.SourceFile).toLowerCase())) ?? items[0]
-
-      if (state.processedFiles[master.SourceFile] && state.processedFiles[master.SourceFile] !== '') {
-        log.push({ type: 'skipped', file: master.SourceFile, reason: 'already-processed' })
-        continue
-      }
-
-      const hash = await md5(master.SourceFile)
-
-      // Сохраняем state сразу после вычисления hash
-      for (const f of items) state.processedFiles[f.SourceFile] = hash
-      await saveState(state)
-
-      if (state.knownHashes[hash]) {
-        log.push({ type: 'duplicate', hash, files: items.map((i) => i.SourceFile) })
-        continue
-      }
-
-      const date = parseDate(master)
-      let baseDir: string
-      let baseName: string
-
-      if (!date) {
-        baseDir = path.join(TARGET_DIR, 'no-photo-taken-date')
-        baseName = hash
-      } else {
-        const y = date.getFullYear().toString()
-        const m = String(date.getMonth() + 1).padStart(2, '0')
-        const d = String(date.getDate()).padStart(2, '0')
-        const hh = String(date.getHours()).padStart(2, '0')
-        const mm = String(date.getMinutes()).padStart(2, '0')
-        const ss = String(date.getSeconds()).padStart(2, '0')
-        baseDir = path.join(TARGET_DIR, y, m, d)
-        baseName = `${y}.${m}.${d}_${hh}.${mm}.${ss}-${hash}`
-      }
-
-      await ensureDir(baseDir)
-
-      await copyFilesWithProgress(items, state, bar)
-
-      state.knownHashes[hash] = baseName
-
-      log.push({
-        type: 'copied',
-        hash,
-        files: items.map((i) => i.SourceFile),
-        targetDir: baseDir,
-      })
-
-      await saveState(state)
-    } catch (e: any) {
-      log.push({ type: 'error', file: items[0].SourceFile, message: e.message ?? String(e) })
+      baseDir = path.join(TARGET_DIR, String(y), m, d)
+      baseName = `${y}.${m}.${d}_${hh}.${mm}.${ss}-${hash}${approx ? '-approx' : ''}`
     }
+
+    await ensureDir(baseDir)
+
+    const ext = path.extname(row.SourceFile).toLowerCase()
+    const target = path.join(baseDir, `${baseName}${ext}`)
+    await fs.copyFile(row.SourceFile, target)
+
+    bar.tick(path.basename(row.SourceFile))
   }
 
-  await fs.writeFile(LOG_PATH, JSON.stringify(log, null, 2), 'utf8')
-
-  console.log(`🧾 Log: ${LOG_PATH}`)
-  console.log(`📦 State: ${STATE_PATH}`)
+  bar.finish()
   console.log('🎉 Done')
 }
 
