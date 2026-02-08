@@ -2,6 +2,8 @@
   "name": "organize-media",
   "version": "0.1.0",
   "description": "Node.js utility for organizing photo and video files based on metadata, handling duplicates, and preserving progress state.",
+  "author": "Zoxon",
+  "license": "MIT",
   "main": "dist/index.js",
   "bin": {
     "organize-media": "./dist/cli.js"
@@ -10,17 +12,21 @@
     "build": "tsc",
     "start": "npm run build && node ./dist/cli.js",
     "dev": "ts-node ./src/cli.ts",
-    "find-media-without-date": "ts-node ./src/find-media-without-date.ts"
+    "find-media-without-date": "ts-node ./src/find-media-without-date.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint ."
   },
-  "author": "",
-  "license": "MIT",
   "dependencies": {
     "cli-progress": "^3.12.0"
   },
   "devDependencies": {
+    "@antfu/eslint-config": "^7.3.0",
     "@types/cli-progress": "^3.11.6",
     "@types/node": "^25.1.0",
+    "eslint": "^9.39.2",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.8"
   }
 }
