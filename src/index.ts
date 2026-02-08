@@ -3,39 +3,38 @@ import { createHash } from 'node:crypto'
 import { promises as fs, createReadStream } from 'node:fs'
 import path from 'path'
 import process from 'process'
-import { ProgressBar } from './helpers'
+import cliProgress from 'cli-progress'
 
 /* ---------- CONFIG ---------- */
 
 const EXIFTOOL = process.platform === 'win32' ? 'exiftool.exe' : 'exiftool'
-const RECOVER_DATE = process.argv.includes('--recover-date')
-
-const SOURCE_DIR = process.argv[2]
-const TARGET_DIR = process.argv[3]
-
-if (!SOURCE_DIR || !TARGET_DIR) {
-  console.error('Usage: npm start -- <sourceDir> <targetDir> [--recover-date]')
-  process.exit(1)
-}
 
 /* ---------- TYPES ---------- */
+
+export type OrganizeOptions = {
+  sourceDir: string
+  targetDir: string
+  recoverDate: boolean
+}
 
 type ExifRow = {
   SourceFile: string
 
   // High confidence (real capture time)
   DateTimeOriginal?: string
+  SubSecDateTimeOriginal?: string
   CreateDate?: string
+  SubSecCreateDate?: string
   MediaCreateDate?: string
+  DateTimeCreated?: string
 
   // Medium confidence (messengers / containers)
   MetadataDate?: string
   TrackCreateDate?: string
   CreationDate?: string
-
-  // Low confidence (filesystem)
-  FileCreateDate?: string
-  FileModifyDate?: string
+  ModifyDate?: string
+  MediaModifyDate?: string
+  TrackModifyDate?: string
 
   ContentIdentifier?: string
 }
@@ -54,8 +53,6 @@ type LogEntry =
 
 /* ---------- GLOBALS ---------- */
 
-const STATE_PATH = path.join(TARGET_DIR, 'organize-state.json')
-const LOG_PATH = path.join(TARGET_DIR, 'organize-log.json')
 const BATCH_SIZE = 100
 
 const log: LogEntry[] = []
@@ -78,38 +75,35 @@ function parseExifDate(raw?: string): Date | null {
 /**
  * Returns date and whether it is approximate
  */
-function resolveDate(row: ExifRow): { date: Date | null; approx: boolean } {
+function resolveDate(row: ExifRow, recoverDate: boolean): { date: Date | null; approx: boolean } {
   // High confidence (photos)
   const exact =
     parseExifDate(row.DateTimeOriginal) ||
+    parseExifDate(row.SubSecDateTimeOriginal) ||
     parseExifDate(row.CreateDate) ||
-    parseExifDate(row.MediaCreateDate)
+    parseExifDate(row.SubSecCreateDate) ||
+    parseExifDate(row.MediaCreateDate) ||
+    parseExifDate(row.DateTimeCreated)
 
   if (exact) {
     return { date: exact, approx: false }
   }
 
-  if (!RECOVER_DATE) {
+  if (!recoverDate) {
     return { date: null, approx: false }
   }
 
   // Medium confidence (messenger / container)
   const medium =
-    parseExifDate(row.MetadataDate) ||
     parseExifDate(row.TrackCreateDate) ||
-    parseExifDate(row.CreationDate)
+    parseExifDate(row.CreationDate) ||
+    parseExifDate(row.MetadataDate) ||
+    parseExifDate(row.ModifyDate) ||
+    parseExifDate(row.MediaModifyDate) ||
+    parseExifDate(row.TrackModifyDate)
 
   if (medium) {
     return { date: medium, approx: true }
-  }
-
-  // Low confidence (filesystem)
-  const low =
-    parseExifDate(row.FileCreateDate) ||
-    parseExifDate(row.FileModifyDate)
-
-  if (low) {
-    return { date: low, approx: true }
   }
 
   return { date: null, approx: false }
@@ -137,20 +131,24 @@ function runExifTool(files: string[]): Promise<ExifRow[]> {
   return new Promise((resolve, reject) => {
     const args = [
       '-json',
+      '-charset',
+      'filename=UTF8',
 
       // High confidence
       '-DateTimeOriginal',
+      '-SubSecDateTimeOriginal',
       '-CreateDate',
+      '-SubSecCreateDate',
       '-MediaCreateDate',
+      '-DateTimeCreated',
 
       // Medium
       '-MetadataDate',
       '-TrackCreateDate',
       '-CreationDate',
-
-      // Low
-      '-FileCreateDate',
-      '-FileModifyDate',
+      '-ModifyDate',
+      '-MediaModifyDate',
+      '-TrackModifyDate',
 
       '-ContentIdentifier',
       '-@',
@@ -185,17 +183,28 @@ function runExifTool(files: string[]): Promise<ExifRow[]> {
 
 async function runExifToolBatch(files: string[]): Promise<ExifRow[]> {
   const results: ExifRow[] = []
-  const bar = new ProgressBar(files.length, `📸 Reading metadata `)
+  const bar = new cliProgress.SingleBar(
+    {
+      format:
+        '📸 Reading metadata [{bar}] {percentage}% ({value}/{total}) {duration_formatted} {filename}',
+      barCompleteChar: '█',
+      barIncompleteChar: '░',
+      hideCursor: true,
+    },
+    cliProgress.Presets.shades_classic
+  )
+  bar.start(files.length, 0, { filename: '' })
 
   for (let i = 0; i < files.length; i += BATCH_SIZE) {
     const rows = await runExifTool(files.slice(i, i + BATCH_SIZE))
     for (const r of rows) {
-      bar.tick(path.basename(r.SourceFile))
+      const name = path.basename(r.SourceFile)
+      bar.increment(1, { filename: name ? `→ ${name}` : '' })
       results.push(r)
     }
   }
 
-  bar.finish()
+  bar.stop()
   return results
 }
 
@@ -209,6 +218,10 @@ async function md5(file: string): Promise<string> {
   })
 }
 
+function md5String(value: string): string {
+  return createHash('md5').update(value).digest('hex')
+}
+
 function isPhoto(ext: string) {
   return ['.heic', '.jpg', '.jpeg', '.png'].includes(ext)
 }
@@ -219,28 +232,80 @@ async function ensureDir(p: string) {
 
 /* ---------- MAIN ---------- */
 
-async function main() {
-  await ensureDir(TARGET_DIR)
+export async function runOrganizeMedia(options: OrganizeOptions) {
+  const { sourceDir, targetDir, recoverDate } = options
+  const statePath = path.join(targetDir, 'organize-state.json')
+  const logPath = path.join(targetDir, 'organize-log.json')
+  void statePath
+  void logPath
+
+  await ensureDir(targetDir)
 
   console.log('🔍 Scanning source...')
-  const allFiles = await walk(SOURCE_DIR)
+  const allFiles = await walk(sourceDir)
   const mediaFiles = allFiles.filter(isMediaFile)
 
   console.log(`📂 Found ${mediaFiles.length} files`)
 
   const meta = await runExifToolBatch(mediaFiles)
-  const bar = new ProgressBar(meta.length, `📦 Copying files     `)
+  const bar = new cliProgress.SingleBar(
+    {
+      format:
+        '📦 Copying files [{bar}] {percentage}% ({value}/{total}) {duration_formatted} {filename}',
+      barCompleteChar: '█',
+      barIncompleteChar: '░',
+      hideCursor: true,
+    },
+    cliProgress.Presets.shades_classic
+  )
+  bar.start(meta.length, 0, { filename: '' })
+  const noDateSources: string[] = []
 
-  for (const row of meta) {
-    const { date, approx } = resolveDate(row)
-    const hash = await md5(row.SourceFile)
+  const resolved = meta.map((row, i) => {
+    const sourceFile = mediaFiles[i] ?? row.SourceFile
+    const ext = path.extname(sourceFile).toLowerCase()
+    const { date, approx } = resolveDate(row, recoverDate)
+    return { row, sourceFile, ext, date, approx }
+  })
+
+  // Live Photos: reuse photo date for paired video by ContentIdentifier
+  const livePhotoDates = new Map<string, { date: Date; approx: boolean }>()
+  const livePhotoHashes = new Map<string, string>()
+  for (const item of resolved) {
+    if (!item.row.ContentIdentifier || !item.date) continue
+    if (!isPhoto(item.ext)) continue
+    const prev = livePhotoDates.get(item.row.ContentIdentifier)
+    if (!prev || (prev.approx && !item.approx)) {
+      livePhotoDates.set(item.row.ContentIdentifier, { date: item.date, approx: item.approx })
+    }
+    if (!livePhotoHashes.has(item.row.ContentIdentifier)) {
+      livePhotoHashes.set(item.row.ContentIdentifier, md5String(item.row.ContentIdentifier))
+    }
+  }
+
+  for (const item of resolved) {
+    const { row, sourceFile } = item
+    let date = item.date
+    let approx = item.approx
+    if (!date && row.ContentIdentifier) {
+      const fromLive = livePhotoDates.get(row.ContentIdentifier)
+      if (fromLive) {
+        date = fromLive.date
+        approx = fromLive.approx
+      }
+    }
+
+    const hash = row.ContentIdentifier
+      ? (livePhotoHashes.get(row.ContentIdentifier) ?? md5String(row.ContentIdentifier))
+      : await md5(sourceFile)
 
     let baseDir: string
     let baseName: string
 
     if (!date) {
-      baseDir = path.join(TARGET_DIR, 'no-photo-taken-date')
+      baseDir = path.join(targetDir, 'no-photo-taken-date')
       baseName = hash
+      noDateSources.push(sourceFile)
     } else {
       const y = date.getFullYear()
       const m = String(date.getMonth() + 1).padStart(2, '0')
@@ -249,24 +314,36 @@ async function main() {
       const mm = String(date.getMinutes()).padStart(2, '0')
       const ss = String(date.getSeconds()).padStart(2, '0')
 
-      baseDir = path.join(TARGET_DIR, String(y), m, d)
+      baseDir = path.join(targetDir, String(y), m, d)
       baseName = `${y}.${m}.${d}_${hh}.${mm}.${ss}-${hash}${approx ? '-approx' : ''}`
     }
 
     await ensureDir(baseDir)
 
-    const ext = path.extname(row.SourceFile).toLowerCase()
+    const ext = item.ext
     const target = path.join(baseDir, `${baseName}${ext}`)
-    await fs.copyFile(row.SourceFile, target)
+    try {
+      await fs.access(target)
+      const name = path.basename(sourceFile)
+      bar.increment(1, { filename: name ? `→ ${name}` : '' })
+      continue
+    } catch {
+      // target doesn't exist, proceed to copy
+    }
 
-    bar.tick(path.basename(row.SourceFile))
+    await fs.copyFile(sourceFile, target)
+
+    const name = path.basename(sourceFile)
+    bar.increment(1, { filename: name ? `→ ${name}` : '' })
   }
 
-  bar.finish()
+  bar.stop()
+
+  if (noDateSources.length > 0) {
+    const reportPath = path.join(targetDir, 'no-date-report.txt')
+    const content = noDateSources.join('\n') + '\n'
+    await fs.writeFile(reportPath, content, 'utf8')
+  }
+
   console.log('🎉 Done')
 }
-
-main().catch((err) => {
-  console.error('❌ Fatal:', err)
-  process.exit(1)
-})

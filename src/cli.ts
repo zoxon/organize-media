@@ -1,33 +1,43 @@
 #!/usr/bin/env node
 
 import process from 'process';
-import path from 'path';
-import { spawn } from 'node:child_process';
+import { parseArgs } from 'node:util';
+import { runOrganizeMedia } from './index';
 
-const args = process.argv.slice(2);
+const { positionals, values } = parseArgs({
+  args: process.argv.slice(2),
+  allowPositionals: true,
+  options: {
+    help: { type: 'boolean', short: 'h' },
+    'recover-date': { type: 'boolean', short: 'r' },
+  },
+});
 
 // Show help if no arguments or --help is passed
-if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
+if (positionals.length === 0 || values.help) {
   console.log(`
 Usage:
-  npx organize-media <sourceDir> <targetDir>
+  npx organize-media <sourceDir> <targetDir> [--recover-date]
 
 Options:
-  -h, --help      Show this help message
+  -h, --help          Show this help message
+  -r, --recover-date  Try to recover date from available metadata
 
 Example:
-  npx organize-media ~/Pictures ~/Pictures/Organized
+  npx organize-media ~/Pictures ~/PicturesOrganized --recover-date
 `);
   process.exit(0);
 }
 
-// Resolve the compiled JS file in dist
-const scriptPath = path.resolve(__dirname, 'dist', 'index.js');
+if (positionals.length < 2) {
+  console.error('❌ Missing arguments. Use --help for usage.');
+  process.exit(1);
+}
 
-const child = spawn(process.execPath, [scriptPath, ...args], {
-  stdio: 'inherit'
-});
+const [sourceDir, targetDir] = positionals;
+const recoverDate = Boolean(values['recover-date']);
 
-child.on('exit', (code) => {
-  process.exit(code ?? 0);
+runOrganizeMedia({ sourceDir, targetDir, recoverDate }).catch((err) => {
+  console.error('❌ Fatal:', err);
+  process.exit(1);
 });

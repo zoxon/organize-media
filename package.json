@@ -8,17 +8,19 @@
   },
   "scripts": {
     "build": "tsc",
-    "start": "npm run build && node ./dist/index.js",
-    "dev": "ts-node ./src/index.ts"
+    "start": "npm run build && node ./dist/cli.js",
+    "dev": "ts-node ./src/cli.ts",
+    "find-media-without-date": "ts-node ./src/find-media-without-date.ts"
   },
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "kleur": "^4.1.5"
+    "cli-progress": "^3.12.0"
   },
   "devDependencies": {
-    "typescript": "^5.9.3",
+    "@types/cli-progress": "^3.11.6",
     "@types/node": "^25.1.0",
-    "ts-node": "^10.9.1"
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
   }
 }
