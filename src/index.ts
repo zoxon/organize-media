@@ -44,7 +44,29 @@ export async function runOrganizeMedia(options: OrganizeOptions) {
   const livePhotoDates = new Map<string, { date: Date, approx: boolean }>()
 
   const livePhotoHashes = new Map<string, string>()
+  const livePhotoNameDates = new Map<string, { date: Date, approx: boolean, photoSourceFile: string, photoHash?: string }>()
+
+  const buildNameKey = (sourceFile: string) => {
+    const parsed = path.parse(sourceFile)
+    const dir = parsed.dir.toLowerCase()
+    const base = parsed.name.toLowerCase()
+    return `${dir}|${base}`
+  }
+
   for (const item of resolved) {
+    if (item.date && isPhoto(item.ext)) {
+      const nameKey = buildNameKey(item.sourceFile)
+      const prev = livePhotoNameDates.get(nameKey)
+
+      if (!prev || (prev.approx && !item.approx)) {
+        livePhotoNameDates.set(nameKey, {
+          date: item.date,
+          approx: item.approx,
+          photoSourceFile: item.sourceFile,
+        })
+      }
+    }
+
     if (!item.row.ContentIdentifier || !item.date) {
       continue
     }
@@ -68,6 +90,7 @@ export async function runOrganizeMedia(options: OrganizeOptions) {
     const { row, sourceFile } = item
     let date = item.date
     let approx = item.approx
+    const nameKey = buildNameKey(sourceFile)
 
     if (!date && row.ContentIdentifier) {
       const fromLive = livePhotoDates.get(row.ContentIdentifier)
@@ -78,9 +101,32 @@ export async function runOrganizeMedia(options: OrganizeOptions) {
       }
     }
 
-    const hash = row.ContentIdentifier
-      ? (livePhotoHashes.get(row.ContentIdentifier) ?? md5String(row.ContentIdentifier))
-      : await md5(sourceFile)
+    if (!date) {
+      const fromName = livePhotoNameDates.get(nameKey)
+
+      if (fromName) {
+        date = fromName.date
+        approx = fromName.approx
+      }
+    }
+
+    let hash: string
+    if (row.ContentIdentifier) {
+      hash = livePhotoHashes.get(row.ContentIdentifier) ?? md5String(row.ContentIdentifier)
+    }
+    else {
+      const fromName = livePhotoNameDates.get(nameKey)
+
+      if (fromName) {
+        if (!fromName.photoHash) {
+          fromName.photoHash = await md5(fromName.photoSourceFile)
+        }
+        hash = fromName.photoHash
+      }
+      else {
+        hash = await md5(sourceFile)
+      }
+    }
 
     const baseDir = date ? formatDateDir(targetDir, date) : path.join(targetDir, 'no-photo-taken-date')
     const baseName = date ? formatBaseName(date, hash, approx) : hash
