@@ -60,7 +60,7 @@ npx organize-media ~/Pictures ~/Pictures/Organized --recover-date
    - `ContentIdentifier` (for grouping Live Photos)
 3. **Resolve Dates:** Picks the best available date (optionally using medium-confidence fields with `--recover-date`).
 4. **Calculate Hashes:** Computes MD5 hashes to build stable filenames and detect collisions.
-5. **Group Live Photos:** Uses `ContentIdentifier` to keep photo/video pairs together.
+5. **Group Live Photos:** Uses `ContentIdentifier` (or matching filenames when missing) to keep photo/video pairs together.
 6. **Copy and Rename:** Files are copied to `targetDir/YYYY/MM/DD` with the format:
    ```
    YYYY.MM.DD_HH.MM.SS-HASH[-approx].ext
