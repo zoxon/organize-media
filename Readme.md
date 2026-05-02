@@ -1,6 +1,6 @@
 # Media Organizer
 
-A Node.js utility for organizing photo and video files based on metadata, handling duplicates, and preserving progress state.
+A Node.js utility for organizing photo and video files based on metadata. It groups Live Photos by `ContentIdentifier` and copies media into a date-based folder structure.
 
 ---
 
@@ -14,8 +14,8 @@ A Node.js utility for organizing photo and video files based on metadata, handli
 - Automatically groups Live Photos (photo + video)
 - Detects duplicates using MD5 hashes
 - Organizes files by date (Year/Month/Day)
-- Maintains a persistent state and log in the target directory
-- Provides a CLI progress bar for scanning and copying
+- Writes a report for files without a captured date
+- Provides a CLI progress bar for reading metadata and copying
 
 ---
 
@@ -37,16 +37,17 @@ Ensure `exiftool` is installed and available in your system path:
 ## Usage
 
 ```bash
-npm start -- <sourceDir> <targetDir>
+npx organize-media <sourceDir> <targetDir> [--recover-date]
 ```
 
 - `<sourceDir>`: Directory containing your media files
 - `<targetDir>`: Directory where organized files will be saved
+- `--recover-date`: Try to recover date from medium-confidence metadata
 
 Example:
 
 ```bash
-npm start -- ~/Pictures ~/Pictures/Organized
+npx organize-media ~/Pictures ~/Pictures/Organized --recover-date
 ```
 
 ---
@@ -54,19 +55,18 @@ npm start -- ~/Pictures ~/Pictures/Organized
 ## How It Works
 
 1. **Scan Source:** Recursively collects all supported media files.
-2. **Load State:** Loads `organize-state.json` from the target directory to track processed files and known hashes.
-3. **Filter New Files:** Skips files that have already been processed.
-4. **Read Metadata:** Uses `exiftool` in batches to extract:
+2. **Read Metadata:** Uses `exiftool` in batches to extract:
    - `DateTimeOriginal`, `CreateDate`, `MediaCreateDate`
    - `ContentIdentifier` (for grouping Live Photos)
-5. **Calculate Hashes:** Computes MD5 hashes to detect duplicates.
-6. **Group Live Photos:** Uses `ContentIdentifier` or filename base to keep photo/video pairs together.
-7. **Copy and Rename:** Files are copied to `targetDir/YYYY/MM/DD` with the format:
+3. **Resolve Dates:** Picks the best available date (optionally using medium-confidence fields with `--recover-date`).
+4. **Calculate Hashes:** Computes MD5 hashes to build stable filenames and detect collisions.
+5. **Group Live Photos:** Uses `ContentIdentifier` to keep photo/video pairs together.
+6. **Copy and Rename:** Files are copied to `targetDir/YYYY/MM/DD` with the format:
    ```
-   YYYY.MM.DD_HH.MM.SS-HASH.ext
+   YYYY.MM.DD_HH.MM.SS-HASH[-approx].ext
    ```
    Files without metadata dates are stored in `targetDir/no-photo-taken-date`.
-8. **Update State & Log:** Saves `organize-state.json` and `organize-log.json` after each operation to ensure resumable processing.
+7. **Write Report:** Saves `no-date-report.txt` in the target directory when needed.
 
 ---
 
@@ -74,8 +74,6 @@ npm start -- ~/Pictures ~/Pictures/Organized
 
 ```
 targetDir/
-├─ organize-state.json   # Tracks processed files and known hashes
-├─ organize-log.json     # Detailed log of copied, skipped, and duplicate files
 ├─ 2026/
 │  ├─ 02/
 │  │  ├─ 02/
@@ -83,6 +81,7 @@ targetDir/
 │  │  │  ├─ ...
 ├─ no-photo-taken-date/
 │  ├─ <hash>.mov
+├─ no-date-report.txt    # List of files without a resolved date
 ```
 
 ---
@@ -97,8 +96,7 @@ targetDir/
 
 ## Error Handling
 
-- Files that cannot be processed are logged as errors in `organize-log.json`.
-- Duplicate files are skipped and logged.
+- If a target filename already exists, the source file is skipped.
 - Any fatal errors terminate the script with an error message.
 
 ---
@@ -106,7 +104,6 @@ targetDir/
 ## Notes
 
 - Live Photos (photo + video) are always grouped and handled together.
-- The state file ensures the script can resume after interruptions without duplicating work.
 - Supports Windows, macOS, and Linux.
 
 ---

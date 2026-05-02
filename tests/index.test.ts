@@ -194,4 +194,87 @@ describe('runOrganizeMedia', () => {
       path.join(datedDir, `${expectedName}.mov`),
     )
   })
+
+  it('pairs live photo video by filename when ContentIdentifier is missing', async () => {
+    const sourceDir = 'C:\\src'
+    const targetDir = 'D:\\target'
+    const date = new Date(2024, 5, 10, 11, 12, 13)
+
+    fsMocks.walk.mockResolvedValue([
+      'C:\\src\\IMG_1234.MP4',
+      'C:\\src\\IMG_1234.HEIC',
+    ])
+
+    exifMocks.runExifToolBatch.mockResolvedValue([
+      { SourceFile: 'C:\\src\\IMG_1234.MP4' },
+      { SourceFile: 'C:\\src\\IMG_1234.HEIC' },
+    ])
+
+    exifMocks.resolveDate.mockImplementation((row: { SourceFile: string }) => {
+      if (row.SourceFile.endsWith('IMG_1234.HEIC'))
+        return { date, approx: false }
+      return { date: null, approx: false }
+    })
+
+    hashMocks.md5.mockImplementation(async (file: string) => (file.endsWith('IMG_1234.HEIC') ? 'hash-photo' : 'hash-video'))
+    fsPromisesMocks.access.mockRejectedValue(new Error('missing'))
+    progressMocks.createProgressBar.mockReturnValue({ increment: vi.fn(), stop: vi.fn() })
+
+    await runOrganizeMedia({ sourceDir, targetDir, recoverDate: false })
+
+    expect(hashMocks.md5).toHaveBeenCalledTimes(1)
+    expect(hashMocks.md5).toHaveBeenCalledWith('C:\\src\\IMG_1234.HEIC')
+
+    const datedDir = formatDateDir(targetDir, date)
+    const expectedName = formatBaseName(date, 'hash-photo', false)
+
+    expect(fsPromisesMocks.copyFile).toHaveBeenCalledWith(
+      'C:\\src\\IMG_1234.MP4',
+      path.join(datedDir, `${expectedName}.mp4`),
+    )
+
+    expect(fsPromisesMocks.copyFile).toHaveBeenCalledWith(
+      'C:\\src\\IMG_1234.HEIC',
+      path.join(datedDir, `${expectedName}.heic`),
+    )
+  })
+
+  it('pairs live photo video by filename when only photo has ContentIdentifier', async () => {
+    const sourceDir = 'C:\\src'
+    const targetDir = 'D:\\target'
+    const date = new Date(2024, 6, 20, 9, 8, 7)
+
+    fsMocks.walk.mockResolvedValue([
+      'C:\\src\\IMG_3091.HEIC',
+      'C:\\src\\IMG_3091.MP4',
+    ])
+
+    exifMocks.runExifToolBatch.mockResolvedValue([
+      { SourceFile: 'C:\\src\\IMG_3091.HEIC', ContentIdentifier: 'CID' },
+      { SourceFile: 'C:\\src\\IMG_3091.MP4' },
+    ])
+
+    exifMocks.resolveDate.mockImplementation((row: { SourceFile: string }) => {
+      if (row.SourceFile.endsWith('IMG_3091.HEIC'))
+        return { date, approx: false }
+      return { date: null, approx: false }
+    })
+
+    hashMocks.md5.mockImplementation(async (file: string) => (file.endsWith('IMG_3091.HEIC') ? 'hash-photo' : 'hash-video'))
+    fsPromisesMocks.access.mockRejectedValue(new Error('missing'))
+    progressMocks.createProgressBar.mockReturnValue({ increment: vi.fn(), stop: vi.fn() })
+
+    await runOrganizeMedia({ sourceDir, targetDir, recoverDate: false })
+
+    expect(hashMocks.md5).toHaveBeenCalledTimes(1)
+    expect(hashMocks.md5).toHaveBeenCalledWith('C:\\src\\IMG_3091.HEIC')
+
+    const datedDir = formatDateDir(targetDir, date)
+    const expectedName = formatBaseName(date, 'hash-photo', false)
+
+    expect(fsPromisesMocks.copyFile).toHaveBeenCalledWith(
+      'C:\\src\\IMG_3091.MP4',
+      path.join(datedDir, `${expectedName}.mp4`),
+    )
+  })
 })
