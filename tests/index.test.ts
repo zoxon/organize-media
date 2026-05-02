@@ -1,5 +1,6 @@
 import path from 'node:path'
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import process from 'node:process'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { formatBaseName, formatDateDir } from '../src/helpers/date'
 import { md5String } from '../src/helpers/hash'
 import { runOrganizeMedia } from '../src/index'
@@ -58,9 +59,73 @@ vi.mock('../src/helpers/hash', async () => {
   }
 })
 
+const cacheMocks = vi.hoisted(() => ({
+  loadExifCache: vi.fn(),
+  loadPartialExifCache: vi.fn(),
+  saveExifCache: vi.fn(),
+}))
+
+vi.mock('../src/helpers/exif-cache', () => ({
+  loadExifCache: cacheMocks.loadExifCache,
+  loadPartialExifCache: cacheMocks.loadPartialExifCache,
+  saveExifCache: cacheMocks.saveExifCache,
+}))
+
+const keyboardMocks = vi.hoisted(() => ({
+  createKeyboardListener: vi.fn(),
+}))
+
+vi.mock('../src/helpers/keyboard', () => ({
+  createKeyboardListener: keyboardMocks.createKeyboardListener,
+}))
+
 describe('runOrganizeMedia', () => {
+  let stdoutWrite: ReturnType<typeof vi.spyOn>
+
   beforeEach(() => {
     vi.clearAllMocks()
+    stdoutWrite = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    progressMocks.createProgressBar.mockReturnValue({
+      increment: vi.fn(),
+      stop: vi.fn(),
+      log: vi.fn(),
+      suspend: vi.fn(),
+      resume: vi.fn(),
+    })
+    cacheMocks.loadExifCache.mockResolvedValue(null)
+    cacheMocks.loadPartialExifCache.mockResolvedValue(null)
+    cacheMocks.saveExifCache.mockResolvedValue(undefined)
+    keyboardMocks.createKeyboardListener.mockReturnValue({
+      paused: false,
+      stopping: false,
+      waitForResume: vi.fn(),
+      dispose: vi.fn(),
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('logs before writing the metadata cache file', async () => {
+    const sourceDir = 'C:\\src'
+    const targetDir = 'D:\\target'
+
+    fsMocks.walk.mockResolvedValue(['C:\\src\\a.jpg'])
+    exifMocks.runExifToolBatch.mockResolvedValue([{ SourceFile: 'C:\\src\\a.jpg' }])
+    exifMocks.resolveDate.mockReturnValue({ date: new Date(2024, 0, 2), approx: false })
+    hashMocks.md5.mockResolvedValue('hash-a')
+    fsPromisesMocks.access.mockRejectedValue(new Error('missing'))
+
+    await runOrganizeMedia({ sourceDir, targetDir, recoverDate: false })
+
+    expect(stdoutWrite).toHaveBeenCalledWith('💾 Writing metadata cache...\n')
+    expect(cacheMocks.saveExifCache).toHaveBeenCalledWith(
+      targetDir,
+      sourceDir,
+      1,
+      [{ SourceFile: 'C:\\src\\a.jpg' }],
+    )
   })
 
   it('copies files and writes no-date report', async () => {
@@ -87,7 +152,6 @@ describe('runOrganizeMedia', () => {
 
     hashMocks.md5.mockImplementation(async (file: string) => (file.includes('a.jpg') ? 'hash-a' : 'hash-b'))
     fsPromisesMocks.access.mockRejectedValue(new Error('missing'))
-    progressMocks.createProgressBar.mockReturnValue({ increment: vi.fn(), stop: vi.fn() })
 
     await runOrganizeMedia({ sourceDir, targetDir, recoverDate: false })
 
@@ -133,7 +197,6 @@ describe('runOrganizeMedia', () => {
     })
 
     fsPromisesMocks.access.mockRejectedValue(new Error('missing'))
-    progressMocks.createProgressBar.mockReturnValue({ increment: vi.fn(), stop: vi.fn() })
 
     await runOrganizeMedia({ sourceDir, targetDir, recoverDate: false })
 
@@ -181,7 +244,6 @@ describe('runOrganizeMedia', () => {
     })
 
     fsPromisesMocks.access.mockRejectedValue(new Error('missing'))
-    progressMocks.createProgressBar.mockReturnValue({ increment: vi.fn(), stop: vi.fn() })
 
     await runOrganizeMedia({ sourceDir, targetDir, recoverDate: false })
 
@@ -218,7 +280,6 @@ describe('runOrganizeMedia', () => {
 
     hashMocks.md5.mockImplementation(async (file: string) => (file.endsWith('IMG_1234.HEIC') ? 'hash-photo' : 'hash-video'))
     fsPromisesMocks.access.mockRejectedValue(new Error('missing'))
-    progressMocks.createProgressBar.mockReturnValue({ increment: vi.fn(), stop: vi.fn() })
 
     await runOrganizeMedia({ sourceDir, targetDir, recoverDate: false })
 
@@ -261,7 +322,6 @@ describe('runOrganizeMedia', () => {
     })
 
     fsPromisesMocks.access.mockRejectedValue(new Error('missing'))
-    progressMocks.createProgressBar.mockReturnValue({ increment: vi.fn(), stop: vi.fn() })
 
     await runOrganizeMedia({ sourceDir, targetDir, recoverDate: false })
 
@@ -280,5 +340,69 @@ describe('runOrganizeMedia', () => {
       'C:\\src\\IMG_3091.MP4',
       path.join(datedDir, `${expectedName}.mp4`),
     )
+  })
+
+  it('uses cached EXIF data and skips runExifToolBatch', async () => {
+    const sourceDir = 'C:\\src'
+    const targetDir = 'D:\\target'
+    const date = new Date(2024, 0, 2, 3, 4, 5)
+    const cachedRows = [{ SourceFile: 'C:\\src\\a.jpg' }]
+
+    fsMocks.walk.mockResolvedValue(['C:\\src\\a.jpg', 'C:\\src\\note.txt'])
+    cacheMocks.loadExifCache.mockResolvedValue(cachedRows)
+    exifMocks.resolveDate.mockReturnValue({ date, approx: false })
+    hashMocks.md5.mockResolvedValue('hash-a')
+    fsPromisesMocks.access.mockRejectedValue(new Error('missing'))
+
+    await runOrganizeMedia({ sourceDir, targetDir, recoverDate: false })
+
+    expect(exifMocks.runExifToolBatch).not.toHaveBeenCalled()
+    expect(cacheMocks.saveExifCache).not.toHaveBeenCalled()
+    expect(cacheMocks.loadExifCache).toHaveBeenCalledWith(targetDir, sourceDir, 1)
+  })
+
+  it('calls keyboard.dispose after copying', async () => {
+    const sourceDir = 'C:\\src'
+    const targetDir = 'D:\\target'
+    const disposeSpy = vi.fn()
+
+    fsMocks.walk.mockResolvedValue(['C:\\src\\a.jpg'])
+    cacheMocks.loadExifCache.mockResolvedValue([{ SourceFile: 'C:\\src\\a.jpg' }])
+    exifMocks.resolveDate.mockReturnValue({ date: new Date(2024, 0, 2), approx: false })
+    hashMocks.md5.mockResolvedValue('hash-a')
+    fsPromisesMocks.access.mockRejectedValue(new Error('missing'))
+    keyboardMocks.createKeyboardListener.mockReturnValue({
+      paused: false,
+      stopping: false,
+      waitForResume: vi.fn(),
+      dispose: disposeSpy,
+    })
+
+    await runOrganizeMedia({ sourceDir, targetDir, recoverDate: false })
+
+    expect(disposeSpy).toHaveBeenCalledOnce()
+  })
+
+  it('calls keyboard.dispose when copying throws', async () => {
+    const sourceDir = 'C:\\src'
+    const targetDir = 'D:\\target'
+    const disposeSpy = vi.fn()
+
+    fsMocks.walk.mockResolvedValue(['C:\\src\\a.jpg'])
+    cacheMocks.loadExifCache.mockResolvedValue([{ SourceFile: 'C:\\src\\a.jpg' }])
+    exifMocks.resolveDate.mockReturnValue({ date: new Date(2024, 0, 2), approx: false })
+    hashMocks.md5.mockResolvedValue('hash-a')
+    fsPromisesMocks.access.mockRejectedValue(new Error('missing'))
+    fsPromisesMocks.copyFile.mockRejectedValue(new Error('copy failed'))
+    keyboardMocks.createKeyboardListener.mockReturnValue({
+      paused: false,
+      stopping: false,
+      waitForResume: vi.fn(),
+      dispose: disposeSpy,
+    })
+
+    await expect(runOrganizeMedia({ sourceDir, targetDir, recoverDate: false })).rejects.toThrow('copy failed')
+
+    expect(disposeSpy).toHaveBeenCalledOnce()
   })
 })

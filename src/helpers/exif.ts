@@ -1,11 +1,20 @@
+import type { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import process from 'node:process'
 import { createProgressBar } from './progress'
 
+export interface PauseControl {
+  readonly paused: boolean
+  readonly stopping: boolean
+  waitForResume: () => Promise<void>
+}
+
 const EXIFTOOL = process.platform === 'win32' ? 'exiftool.exe' : 'exiftool'
 const BATCH_SIZE = 100
 const CONCURRENCY = 4
+const RE_EXIF_DATE = /^(\d{4}):(\d{2}):(\d{2})/
+const RE_BACKSLASH = /\\/g
 
 export interface ExifRow {
   SourceFile: string
@@ -33,7 +42,7 @@ export interface ExifRow {
 function parseExifDate(raw?: string): Date | null {
   if (!raw)
     return null
-  const fixed = raw.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3')
+  const fixed = raw.replace(RE_EXIF_DATE, '$1-$2-$3')
   // EXIF dates carry no timezone; new Date() parses the result as local time
   const d = new Date(fixed)
   return Number.isNaN(d.getTime()) ? null : d
@@ -149,7 +158,7 @@ class ExifDaemon {
         }
 
         // exiftool silently skips files it cannot read; fill in stub rows to preserve alignment
-        const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase()
+        const norm = (s: string) => s.replace(RE_BACKSLASH, '/').toLowerCase()
         const byPath = new Map(rows.map(r => [norm(r.SourceFile), r]))
         resolve(files.map(f => byPath.get(norm(f)) ?? { SourceFile: f }))
       })
@@ -171,20 +180,87 @@ class ExifDaemon {
   }
 }
 
-export async function runExifToolBatch(files: string[]): Promise<ExifRow[]> {
-  const bar = createProgressBar(files.length, '[1/2] 📸 Reading metadata')
+export async function runExifToolBatch(files: string[], pause?: PauseControl): Promise<ExifRow[]> {
+  const pauseHint = pause && process.stdin.isTTY ? '  (P = pause)' : ''
+  const bar = createProgressBar(files.length, `[1/2] 📸 Reading metadata${pauseHint}`)
 
   const chunks: string[][] = []
   for (let i = 0; i < files.length; i += BATCH_SIZE)
     chunks.push(files.slice(i, i + BATCH_SIZE))
 
   const numDaemons = Math.min(CONCURRENCY, chunks.length)
-  const daemons = Array.from({ length: numDaemons }, () => new ExifDaemon())
-  const results: ExifRow[][] = new Array(chunks.length)
+  const daemons = Array.from<undefined>({ length: numDaemons }).fill(undefined).map(() => new ExifDaemon())
+  const results: ExifRow[][] = Array.from({ length: chunks.length })
   let next = 0
+  let pausing = false
+  let pauseRequestedLogged = false
+  let stopRequestedLogged = false
+  let savingLogged = false
+
+  function logSavingOnce() {
+    if (savingLogged)
+      return
+    savingLogged = true
+    bar.log('💾 Saving progress — please wait…')
+  }
+
+  async function waitIfPaused(): Promise<void> {
+    if (!pause?.paused)
+      return
+
+    const logMessages = !pausing
+    pausing = true
+    if (logMessages) {
+      bar.suspend()
+      bar.log('⏸  Paused — press R to resume')
+    }
+
+    await pause.waitForResume()
+
+    if (pause.stopping) {
+      logSavingOnce()
+      return
+    }
+
+    if (logMessages) {
+      pausing = false
+      bar.resume()
+      bar.log('▶  Resumed')
+    }
+  }
+
+  const statusTimer = setInterval(() => {
+    if (pause?.stopping && !stopRequestedLogged) {
+      stopRequestedLogged = true
+      bar.suspend()
+      bar.log('⏹  Stopping after current metadata batch — cache will be saved')
+      return
+    }
+
+    if (pause?.paused && !pauseRequestedLogged) {
+      pauseRequestedLogged = true
+      bar.suspend()
+      bar.log('⏸  Pausing after current metadata batch — press R to resume')
+    }
+
+    if (!pause?.paused) {
+      if (pauseRequestedLogged && !pausing) {
+        bar.resume()
+        bar.log('▶  Resumed')
+      }
+      pauseRequestedLogged = false
+    }
+  }, 100)
 
   async function worker(daemon: ExifDaemon) {
     while (next < chunks.length) {
+      await waitIfPaused()
+
+      if (pause?.stopping) {
+        logSavingOnce()
+        break
+      }
+
       const i = next++
       const rows = await daemon.run(chunks[i])
       for (const r of rows) {
@@ -192,6 +268,11 @@ export async function runExifToolBatch(files: string[]): Promise<ExifRow[]> {
         bar.increment(1, { filename: name ? `→ ${name}` : '' })
       }
       results[i] = rows
+      if (pause?.stopping) {
+        logSavingOnce()
+        break
+      }
+      await waitIfPaused()
     }
   }
 
@@ -199,9 +280,10 @@ export async function runExifToolBatch(files: string[]): Promise<ExifRow[]> {
     await Promise.all(daemons.map(d => worker(d)))
   }
   finally {
+    clearInterval(statusTimer)
     for (const d of daemons) d.close()
     bar.stop()
   }
 
-  return results.flat()
+  return results.flatMap(chunk => chunk ?? [])
 }

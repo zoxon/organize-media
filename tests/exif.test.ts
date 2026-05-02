@@ -4,9 +4,12 @@ import { resolveDate, runExifToolBatch } from '../src/helpers/exif'
 
 const progressMocks = vi.hoisted(() => {
   const increment = vi.fn()
+  const log = vi.fn()
+  const suspend = vi.fn()
+  const resume = vi.fn()
   const stop = vi.fn()
-  const createProgressBar = vi.fn(() => ({ increment, stop }))
-  return { increment, stop, createProgressBar }
+  const createProgressBar = vi.fn(() => ({ increment, log, suspend, resume, stop }))
+  return { increment, log, suspend, resume, stop, createProgressBar }
 })
 
 vi.mock('../src/helpers/progress', () => ({
@@ -16,6 +19,7 @@ vi.mock('../src/helpers/progress', () => ({
 // Simulates the exiftool -stay_open daemon protocol.
 // Watches stdin for "-executeN\n" markers and responds via stdout with JSON + "{readyN}\n".
 const childProcessMocks = vi.hoisted(() => {
+  let responseDelayMs = 0
   const spawn = vi.fn((_cmd: string, _args: string[]) => {
     const proc = new EventEmitter() as EventEmitter & {
       stdout: EventEmitter
@@ -33,8 +37,8 @@ const childProcessMocks = vi.hoisted(() => {
       write: (d: string) => {
         stdinData += d
         const re = /-execute(\d+)\n/
-        let match: RegExpExecArray | null
-        while ((match = re.exec(stdinData)) !== null) {
+        let match: RegExpExecArray | null = re.exec(stdinData)
+        while (match !== null) {
           const seqNum = match[1]
           const block = stdinData.slice(0, match.index)
           stdinData = stdinData.slice(match.index + match[0].length)
@@ -43,7 +47,11 @@ const childProcessMocks = vi.hoisted(() => {
           const files = lines.filter(l => !l.startsWith('-'))
 
           const out = JSON.stringify(files.map(SourceFile => ({ SourceFile })))
-          setImmediate(() => stdout.emit('data', `${out}\n{ready${seqNum}}\n`))
+          if (responseDelayMs > 0)
+            setTimeout(() => stdout.emit('data', `${out}\n{ready${seqNum}}\n`), responseDelayMs)
+          else
+            setImmediate(() => stdout.emit('data', `${out}\n{ready${seqNum}}\n`))
+          match = re.exec(stdinData)
         }
       },
       end: () => {},
@@ -52,7 +60,12 @@ const childProcessMocks = vi.hoisted(() => {
     return proc
   })
 
-  return { spawn }
+  return {
+    setResponseDelayMs(value: number) {
+      responseDelayMs = value
+    },
+    spawn,
+  }
 })
 
 vi.mock('node:child_process', () => ({
@@ -118,6 +131,8 @@ describe('helpers/exif resolveDate', () => {
 describe('helpers/exif runExifToolBatch', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.useRealTimers()
+    childProcessMocks.setResponseDelayMs(0)
   })
 
   it('returns stub rows for unreadable files and continues without crashing', async () => {
@@ -170,5 +185,101 @@ describe('helpers/exif runExifToolBatch', () => {
     expect(res.length).toBe(101)
     expect(res[0].SourceFile).toBe('file-0.jpg')
     expect(res[100].SourceFile).toBe('file-100.jpg')
+  })
+
+  it('does not log resumed when Ctrl+C stop releases a paused metadata read', async () => {
+    let stopping = false
+    const pause = {
+      get paused() { return true },
+      get stopping() { return stopping },
+      waitForResume: vi.fn(async () => {
+        stopping = true
+      }),
+    }
+
+    await runExifToolBatch(['file-0.jpg'], pause)
+
+    expect(progressMocks.log).toHaveBeenCalledWith('⏸  Paused — press R to resume')
+    expect(progressMocks.log).toHaveBeenCalledWith('💾 Saving progress — please wait…')
+    expect(progressMocks.log).not.toHaveBeenCalledWith('▶  Resumed')
+    expect(progressMocks.suspend).toHaveBeenCalled()
+    expect(progressMocks.resume).not.toHaveBeenCalled()
+  })
+
+  it('logs that metadata reading is pausing while current batch finishes', async () => {
+    vi.useFakeTimers()
+    childProcessMocks.setResponseDelayMs(1000)
+    let paused = false
+    let resume: (() => void) | undefined
+    const pause = {
+      get paused() { return paused },
+      get stopping() { return false },
+      waitForResume: vi.fn(() => new Promise<void>((resolve) => {
+        resume = resolve
+      })),
+    }
+
+    const run = runExifToolBatch(['file-0.jpg'], pause)
+    paused = true
+
+    await vi.advanceTimersByTimeAsync(250)
+
+    expect(progressMocks.log).toHaveBeenCalledWith('⏸  Pausing after current metadata batch — press R to resume')
+    expect(progressMocks.suspend).toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1000)
+    paused = false
+    resume?.()
+    await run
+  })
+
+  it('resumes the progress bar when pause is canceled before the current metadata batch finishes', async () => {
+    vi.useFakeTimers()
+    childProcessMocks.setResponseDelayMs(1000)
+    let paused = false
+    const pause = {
+      get paused() { return paused },
+      get stopping() { return false },
+      waitForResume: vi.fn(),
+    }
+
+    const run = runExifToolBatch(['file-0.jpg'], pause)
+    paused = true
+
+    await vi.advanceTimersByTimeAsync(250)
+    expect(progressMocks.log).toHaveBeenCalledWith('⏸  Pausing after current metadata batch — press R to resume')
+    expect(progressMocks.suspend).toHaveBeenCalled()
+
+    paused = false
+    await vi.advanceTimersByTimeAsync(100)
+
+    expect(progressMocks.resume).toHaveBeenCalled()
+    expect(progressMocks.log).toHaveBeenCalledWith('▶  Resumed')
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await run
+  })
+
+  it('logs that metadata reading is stopping while current batch finishes', async () => {
+    vi.useFakeTimers()
+    childProcessMocks.setResponseDelayMs(1000)
+    let stopping = false
+    const pause = {
+      get paused() { return false },
+      get stopping() { return stopping },
+      waitForResume: vi.fn(),
+    }
+
+    const run = runExifToolBatch(['file-0.jpg'], pause)
+    await vi.advanceTimersByTimeAsync(0)
+    stopping = true
+
+    await vi.advanceTimersByTimeAsync(250)
+
+    expect(progressMocks.log).toHaveBeenCalledWith('⏹  Stopping after current metadata batch — cache will be saved')
+    expect(progressMocks.suspend).toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await run
   })
 })
