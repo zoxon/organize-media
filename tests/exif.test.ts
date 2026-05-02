@@ -13,6 +13,8 @@ vi.mock('../src/helpers/progress', () => ({
   createProgressBar: progressMocks.createProgressBar,
 }))
 
+// Simulates the exiftool -stay_open daemon protocol.
+// Watches stdin for "-executeN\n" markers and responds via stdout with JSON + "{readyN}\n".
 const childProcessMocks = vi.hoisted(() => {
   const spawn = vi.fn((_cmd: string, _args: string[]) => {
     const proc = new EventEmitter() as EventEmitter & {
@@ -30,17 +32,21 @@ const childProcessMocks = vi.hoisted(() => {
     proc.stdin = {
       write: (d: string) => {
         stdinData += d
-      },
-      end: () => {
-        const files = stdinData
-          .split('\n')
-          .map(s => s.trim())
-          .filter(Boolean)
+        const re = /-execute(\d+)\n/
+        let match: RegExpExecArray | null
+        while ((match = re.exec(stdinData)) !== null) {
+          const seqNum = match[1]
+          const block = stdinData.slice(0, match.index)
+          stdinData = stdinData.slice(match.index + match[0].length)
 
-        const out = JSON.stringify(files.map(SourceFile => ({ SourceFile })))
-        stdout.emit('data', out)
-        setImmediate(() => proc.emit('close', 0))
+          const lines = block.split('\n').map(s => s.trim()).filter(Boolean)
+          const files = lines.filter(l => !l.startsWith('-'))
+
+          const out = JSON.stringify(files.map(SourceFile => ({ SourceFile })))
+          setImmediate(() => stdout.emit('data', `${out}\n{ready${seqNum}}\n`))
+        }
       },
+      end: () => {},
     }
 
     return proc
@@ -121,15 +127,24 @@ describe('helpers/exif runExifToolBatch', () => {
         stderr: EventEmitter
         stdin: { write: (d: string) => void, end: () => void }
       }
-      proc.stdout = new EventEmitter()
+      const stdout = new EventEmitter()
+      proc.stdout = stdout
       proc.stderr = new EventEmitter()
+      let stdinData = ''
       proc.stdin = {
-        write: () => {},
-        end: () => {
-          proc.stdout.emit('data', JSON.stringify([{ SourceFile: 'good.jpg' }]))
-          proc.stderr.emit('data', 'File format error - bad.avi\n')
-          setImmediate(() => proc.emit('close', 1))
+        write: (d: string) => {
+          stdinData += d
+          const re = /-execute(\d+)\n/
+          const match = re.exec(stdinData)
+          if (match) {
+            const seqNum = match[1]
+            stdinData = stdinData.slice(match.index + match[0].length)
+            proc.stderr.emit('data', 'File format error - bad.avi\n')
+            // Only good.jpg returned; exiftool silently skips bad.avi
+            setImmediate(() => stdout.emit('data', `${JSON.stringify([{ SourceFile: 'good.jpg' }])}\n{ready${seqNum}}\n`))
+          }
         },
+        end: () => {},
       }
       return proc
     })
@@ -142,13 +157,14 @@ describe('helpers/exif runExifToolBatch', () => {
     expect(res[1].DateTimeOriginal).toBeUndefined()
   })
 
-  it('processes files in batches and tracks progress', async () => {
+  it('processes files in batches across daemon pool and tracks progress', async () => {
     const files = Array.from({ length: 101 }, (_, i) => `file-${i}.jpg`)
 
     const res = await runExifToolBatch(files)
 
+    // Pool of daemons: one per worker (min(CONCURRENCY, chunks) = min(4, 2) = 2)
     expect(childProcessMocks.spawn).toHaveBeenCalledTimes(2)
-    expect(progressMocks.createProgressBar).toHaveBeenCalledWith(101, '📸 Reading metadata')
+    expect(progressMocks.createProgressBar).toHaveBeenCalledWith(101, '[1/2] 📸 Reading metadata')
     expect(progressMocks.increment).toHaveBeenCalledTimes(101)
     expect(progressMocks.stop).toHaveBeenCalledTimes(1)
     expect(res.length).toBe(101)

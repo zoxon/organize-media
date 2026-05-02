@@ -21,7 +21,14 @@ export async function runOrganizeMedia(options: OrganizeOptions) {
   await ensureDir(targetDir)
 
   // eslint-disable-next-line no-console
-  console.log('🔍 Scanning source...')
+  console.log(`Source  ${sourceDir}`)
+  // eslint-disable-next-line no-console
+  console.log(`Target  ${targetDir}`)
+  // eslint-disable-next-line no-console
+  console.log()
+
+  // eslint-disable-next-line no-console
+  console.log('🔍 Scanning...')
   const allFiles = await walk(sourceDir)
   const mediaFiles = allFiles.filter(isMediaFile)
 
@@ -29,8 +36,10 @@ export async function runOrganizeMedia(options: OrganizeOptions) {
   console.log(`📂 Found ${mediaFiles.length} files`)
 
   const meta = await runExifToolBatch(mediaFiles)
-  const bar = createProgressBar(meta.length, '📦 Copying files')
+  const bar = createProgressBar(meta.length, '[2/2] 📦 Copying files')
   const noDateSources: string[] = []
+  let copied = 0
+  let skipped = 0
 
   const resolved = meta.map((row, i) => {
     const sourceFile = mediaFiles[i] ?? row.SourceFile
@@ -141,9 +150,11 @@ export async function runOrganizeMedia(options: OrganizeOptions) {
     const ext = item.ext
     const target = path.join(baseDir, `${baseName}${ext}`)
 
+    const name = path.basename(sourceFile)
+
     try {
       await fs.access(target)
-      const name = path.basename(sourceFile)
+      skipped++
       bar.increment(1, { filename: name ? `→ ${name}` : '' })
       continue
     }
@@ -152,8 +163,7 @@ export async function runOrganizeMedia(options: OrganizeOptions) {
     }
 
     await fs.copyFile(sourceFile, target)
-
-    const name = path.basename(sourceFile)
+    copied++
     bar.increment(1, { filename: name ? `→ ${name}` : '' })
   }
 
@@ -165,6 +175,9 @@ export async function runOrganizeMedia(options: OrganizeOptions) {
     await fs.writeFile(reportPath, content, 'utf8')
   }
 
+  const parts = [`${copied} copied`]
+  if (skipped > 0) parts.push(`${skipped} skipped`)
+  if (noDateSources.length > 0) parts.push(`${noDateSources.length} no date`)
   // eslint-disable-next-line no-console
-  console.log('🎉 Done')
+  console.log(`🎉 Done  ${parts.join('  ·  ')}`)
 }
