@@ -26,12 +26,14 @@ export interface ExifRow {
   TrackModifyDate?: string
 
   ContentIdentifier?: string
+  ImageDataHash?: string
 }
 
 function parseExifDate(raw?: string): Date | null {
   if (!raw)
     return null
   const fixed = raw.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3')
+  // EXIF dates carry no timezone; new Date() parses the result as local time
   const d = new Date(fixed)
   return Number.isNaN(d.getTime()) ? null : d
 }
@@ -97,6 +99,7 @@ function runExifTool(files: string[]): Promise<ExifRow[]> {
       '-TrackModifyDate',
 
       '-ContentIdentifier',
+      '-ImageDataHash',
       '-@',
       '-',
     ]
@@ -118,12 +121,24 @@ function runExifTool(files: string[]): Promise<ExifRow[]> {
     p.stdin.end()
 
     p.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(err || `ExifTool exited with code ${code}`))
+      if (code !== 0 && !out.trim()) {
+        reject(new Error(`ExifTool exited with code ${code}`))
+        return
       }
-      else {
-        resolve(JSON.parse(out))
+
+      let rows: ExifRow[]
+      try {
+        rows = JSON.parse(out || '[]')
       }
+      catch {
+        reject(new Error(`ExifTool produced unparseable output (exit code ${code})`))
+        return
+      }
+
+      // exiftool silently skips files it cannot read; fill in stub rows to preserve alignment
+      const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase()
+      const byPath = new Map(rows.map(r => [norm(r.SourceFile), r]))
+      resolve(files.map(f => byPath.get(norm(f)) ?? { SourceFile: f }))
     })
   })
 }

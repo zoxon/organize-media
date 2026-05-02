@@ -63,6 +63,7 @@ export async function runOrganizeMedia(options: OrganizeOptions) {
           date: item.date,
           approx: item.approx,
           photoSourceFile: item.sourceFile,
+          photoHash: item.row.ContentIdentifier ? md5String(item.row.ContentIdentifier) : item.row.ImageDataHash,
         })
       }
     }
@@ -124,7 +125,7 @@ export async function runOrganizeMedia(options: OrganizeOptions) {
         hash = fromName.photoHash
       }
       else {
-        hash = await md5(sourceFile)
+        hash = row.ImageDataHash ?? await md5(sourceFile)
       }
     }
 

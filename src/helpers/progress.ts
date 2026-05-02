@@ -1,9 +1,12 @@
 import cliProgress from 'cli-progress'
 
 export function createProgressBar(total: number, label: string) {
+  // eslint-disable-next-line no-console
+  console.log(label)
+
   const bar = new cliProgress.SingleBar(
     {
-      format: `${label} [{bar}] {percentage}% ({value}/{total}) {duration_formatted} {filename}`,
+      format: `[{bar}] {percentage}% ({value}/{total}) {duration_formatted} {filename}`,
       barCompleteChar: '█',
       barIncompleteChar: '░',
       hideCursor: true,

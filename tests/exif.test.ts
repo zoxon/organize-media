@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { resolveDate, runExifToolBatch } from '../src/helpers/exif'
 
 const progressMocks = vi.hoisted(() => {
@@ -110,6 +110,38 @@ describe('helpers/exif resolveDate', () => {
 })
 
 describe('helpers/exif runExifToolBatch', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('returns stub rows for unreadable files and continues without crashing', async () => {
+    childProcessMocks.spawn.mockImplementationOnce(() => {
+      const proc = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter
+        stderr: EventEmitter
+        stdin: { write: (d: string) => void, end: () => void }
+      }
+      proc.stdout = new EventEmitter()
+      proc.stderr = new EventEmitter()
+      proc.stdin = {
+        write: () => {},
+        end: () => {
+          proc.stdout.emit('data', JSON.stringify([{ SourceFile: 'good.jpg' }]))
+          proc.stderr.emit('data', 'File format error - bad.avi\n')
+          setImmediate(() => proc.emit('close', 1))
+        },
+      }
+      return proc
+    })
+
+    const res = await runExifToolBatch(['good.jpg', 'bad.avi'])
+
+    expect(res).toHaveLength(2)
+    expect(res[0].SourceFile).toBe('good.jpg')
+    expect(res[1].SourceFile).toBe('bad.avi')
+    expect(res[1].DateTimeOriginal).toBeUndefined()
+  })
+
   it('processes files in batches and tracks progress', async () => {
     const files = Array.from({ length: 101 }, (_, i) => `file-${i}.jpg`)
 

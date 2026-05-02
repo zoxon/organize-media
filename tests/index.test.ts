@@ -260,18 +260,22 @@ describe('runOrganizeMedia', () => {
       return { date: null, approx: false }
     })
 
-    hashMocks.md5.mockImplementation(async (file: string) => (file.endsWith('IMG_3091.HEIC') ? 'hash-photo' : 'hash-video'))
     fsPromisesMocks.access.mockRejectedValue(new Error('missing'))
     progressMocks.createProgressBar.mockReturnValue({ increment: vi.fn(), stop: vi.fn() })
 
     await runOrganizeMedia({ sourceDir, targetDir, recoverDate: false })
 
-    expect(hashMocks.md5).toHaveBeenCalledTimes(1)
-    expect(hashMocks.md5).toHaveBeenCalledWith('C:\\src\\IMG_3091.HEIC')
+    // Both files must share the CID-based hash — no file-content hashing needed
+    expect(hashMocks.md5).not.toHaveBeenCalled()
 
     const datedDir = formatDateDir(targetDir, date)
-    const expectedName = formatBaseName(date, 'hash-photo', false)
+    const hash = md5String('CID')
+    const expectedName = formatBaseName(date, hash, false)
 
+    expect(fsPromisesMocks.copyFile).toHaveBeenCalledWith(
+      'C:\\src\\IMG_3091.HEIC',
+      path.join(datedDir, `${expectedName}.heic`),
+    )
     expect(fsPromisesMocks.copyFile).toHaveBeenCalledWith(
       'C:\\src\\IMG_3091.MP4',
       path.join(datedDir, `${expectedName}.mp4`),

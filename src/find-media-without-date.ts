@@ -45,6 +45,7 @@ const MEDIA_EXT = new Set([
   '.avi',
   '.mkv',
   '.webp',
+  '.dng',
 ])
 
 function isMediaFile(file: string): boolean {
